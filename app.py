@@ -9,7 +9,7 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")  # для верифика
 app = FastAPI()
 
 # Инициализируем PTB (только dispatcher, без polling)
-updater = Updater(8351457188:AAFQZAI19EVjSbhLsjwfn7eFXtp79td3274, use_context=True)
+updater = Updater("8351457188:AAFQZAI19EVjSbhLsjwfn7eFXtp79td3274", use_context=True)
 dp: Dispatcher = updater.dispatcher
 
 # --- handlers ---
