@@ -3,8 +3,8 @@ from fastapi import FastAPI, Request, HTTPException
 from telegram import Update
 from telegram.ext import Updater, Dispatcher, CommandHandler, CallbackContext
 
-BOT_TOKEN = os.environ["8351457188:AAFQZAI19EVjSbhLsjwfn7eFXtp79td3274"]  # зададим в настройках PaaS
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")  # для верификации запросов (рекомендуется)
+BOT_TOKEN = os.environ["BOT_TOKEN"]  # значение берём из Render → Environment
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "") 
 
 app = FastAPI()
 
