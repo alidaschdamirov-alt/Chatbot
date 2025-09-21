@@ -15,6 +15,18 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")  # если зададит
 # Путь к скрипту, который делает картинку (лежит рядом с этим файлом)
 SCRAPER = Path(__file__).with_name("scrape_table_screenshot.py")
 OUT_PNG = Path(__file__).with_name("table_only.png")
+USER_DATA_DIR = Path(__file__).with_name("user-data")
+
+cmd = [
+    "python", str(SCRAPER),
+    "--url", CALENDAR_URL,
+    "--out", str(OUT_PNG),
+    "--wait", str(WAIT_SECONDS),
+    "--user-data-dir", str(USER_DATA_DIR),
+    "--headless",
+]
+
+OUT_PNG = Path(__file__).with_name("table_only.png")
 USER_DATA_DIR = Path(__file__).with_name("user-data")  # для сохранения cookies (Cloudflare)
 WAIT_SECONDS = os.environ.get("CAL_WAIT", "5")        # доп.ожидание после загрузки страницы
 RUN_TIMEOUT = int(os.environ.get("CAL_TIMEOUT", "90"))  # таймаут выполнения, сек
