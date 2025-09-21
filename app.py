@@ -13,7 +13,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN") or "8351457188:AAFQZAI19EVjSbhLsjwfn7eFX
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")  # если зададите, Telegram должен слать тот же secret_token
 
 # Путь к скрипту, который делает картинку (лежит рядом с этим файлом)
-SCRAPER = Path(__file__).with_name("scrape_investing_calendar.py")
+SCRAPER = Path(__file__).with_name("scrape_table_screenshot.py")
 OUT_PNG = Path(__file__).with_name("table_only.png")
 USER_DATA_DIR = Path(__file__).with_name("user-data")  # для сохранения cookies (Cloudflare)
 WAIT_SECONDS = os.environ.get("CAL_WAIT", "5")        # доп.ожидание после загрузки страницы
