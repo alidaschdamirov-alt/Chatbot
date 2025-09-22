@@ -23,10 +23,8 @@ USER_DATA_DIR = Path(__file__).with_name("user-data")
 
 # URL из вашего iframe (страница, которую надо сфотографировать)
 CALENDAR_URL = (
-    "https://sslecal2.investing.com?"
-    "columns=exc_flags,exc_currency,exc_importance,exc_actual,exc_forecast,exc_previous"
-    "&category=_employment,_economicActivity,_inflation,_credit,_centralBanks,_confidenceIndex,_balance,_Bonds"
-    "&importance=2,3&features=datepicker,timezone&countries=37,5&calType=week&timeZone=73&lang=1"
+    "https://www.bankrespublika.az/az/"
+  
 )
 
 # Тайминги для скриншота
