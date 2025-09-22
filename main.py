@@ -8,30 +8,20 @@ from telegram import Update
 from telegram.ext import Updater, Dispatcher, CommandHandler, CallbackContext
 
 # ===== НАСТРОЙКИ =====
-# РЕКОМЕНДУЮ: держите токен в переменной окружения BOT_TOKEN (Render → Environment)
-BOT_TOKEN = os.environ.get("BOT_TOKEN") or "8351457188:AAFQZAI19EVjSbhLsjwfn7eFXtp79td3274"
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")  # если зададите, Telegram должен слать тот же secret_token
+BOT_TOKEN = os.environ.get("BOT_TOKEN") or "PUT_YOUR_TOKEN_HERE"
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")  # если зададите, Telegram будет слать тот же secret_token
 
-# Путь к скрипту, который делает картинку (лежит рядом с этим файлом)
-SCRAPER = Path(__file__).with_name("scrape_table_screenshot.py")
-OUT_PNG = Path(__file__).with_name("table_only.png")
+# Минимальный скрипт, который делает полный скрин страницы (лежит рядом с этим файлом)
+# см. screenshot_page.py из предыдущего сообщения
+SCRAPER = Path(__file__).with_name("screenshot_page.py")
+
+# Куда сохраняем готовую картинку
+OUT_PNG = Path(__file__).with_name("page.png")
+
+# Директория с persistent cookies (для Cloudflare); можно закоммитить её, чтобы куки переживали деплой
 USER_DATA_DIR = Path(__file__).with_name("user-data")
 
-cmd = [
-    "python", str(SCRAPER),
-    "--url", CALENDAR_URL,
-    "--out", str(OUT_PNG),
-    "--wait", str(WAIT_SECONDS),
-    "--user-data-dir", str(USER_DATA_DIR),
-    "--headless",
-]
-
-OUT_PNG = Path(__file__).with_name("table_only.png")
-USER_DATA_DIR = Path(__file__).with_name("user-data")  # для сохранения cookies (Cloudflare)
-WAIT_SECONDS = os.environ.get("CAL_WAIT", "5")        # доп.ожидание после загрузки страницы
-RUN_TIMEOUT = int(os.environ.get("CAL_TIMEOUT", "90"))  # таймаут выполнения, сек
-
-# URL из вашего iframe
+# URL из вашего iframe (страница, которую надо сфотографировать)
 CALENDAR_URL = (
     "https://sslecal2.investing.com?"
     "columns=exc_flags,exc_currency,exc_importance,exc_actual,exc_forecast,exc_previous"
@@ -39,15 +29,23 @@ CALENDAR_URL = (
     "&importance=2,3&features=datepicker,timezone&countries=37,5&calType=week&timeZone=73&lang=1"
 )
 
+# Тайминги для скриншота
+WAIT_SECONDS = os.environ.get("CAL_WAIT", "5")           # подождать после загрузки
+RUN_TIMEOUT = int(os.environ.get("CAL_TIMEOUT", "90"))   # таймаут выполнения, сек
+
 app = FastAPI()
 
 # ===== Инициализация PTB (без polling) =====
 updater = Updater(BOT_TOKEN, use_context=True)
 dp: Dispatcher = updater.dispatcher
 
-# ===== Хэндлеры команд =====
+
+# ===== ХЭНДЛЕРЫ КОМАНД =====
 def start(update: Update, context: CallbackContext):
-    update.message.reply_text("Привет! Я работаю на вебхуках 🤖\nКоманда: /calendar — пришлю скрин календаря.")
+    update.message.reply_text(
+        "Привет! Я работаю на вебхуках 🤖\n"
+        "Команда: /calendar — пришлю скрин страницы календаря."
+    )
 
 def help_cmd(update: Update, context: CallbackContext):
     update.message.reply_text("Команды: /start /help /btc /eth /avax /calendar")
@@ -61,33 +59,36 @@ def eth(update: Update, context: CallbackContext):
 def avax(update: Update, context: CallbackContext):
     update.message.reply_text("AVAX: 🔺")
 
-def calendar(update: Update, context: CallbackContext):
-    """Запускает внешний скрипт скриннера и шлёт PNG в чат."""
-    chat = update.effective_chat
 
-    # Проверки наличия скрипта
+def calendar(update: Update, context: CallbackContext):
+    """Запускает внешний скрипт скринера и отправляет PNG в чат."""
+    chat_id = update.effective_chat.id
+
     if not SCRAPER.exists():
-        update.message.reply_text(f"❌ Не найден скрипт: {SCRAPER.name}\n"
-                                  f"Сохраните файл рядом с main.py.")
+        update.message.reply_text(
+            f"❌ Не найден скрипт: {SCRAPER.name}\n"
+            f"Создайте рядом файл screenshot_page.py (минимальный скрипт скрина)."
+        )
         return
 
-    # Удалим старый PNG
+    # Сносим старую картинку, чтобы не отправить прошлую
     try:
         if OUT_PNG.exists():
             OUT_PNG.unlink()
     except Exception:
         pass
 
-    update.message.reply_text("⏳ Делаю скрин экономического календаря…")
+    update.message.reply_text("⏳ Делаю скрин страницы…")
 
-    # Команда запуска Playwright-скринера
+    # Команда запуска минимального скрипта скринера
+    # ВАЖНО: screenshot_page.py поддерживает именно эти флаги
     cmd = [
         "python", str(SCRAPER),
         "--url", CALENDAR_URL,
         "--out", str(OUT_PNG),
         "--wait", str(WAIT_SECONDS),
         "--user-data-dir", str(USER_DATA_DIR),
-        "--headless"
+        "--headless",
     ]
 
     try:
@@ -106,20 +107,25 @@ def calendar(update: Update, context: CallbackContext):
 
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "")[-2000:]
-        update.message.reply_text(f"❌ Скрипт завершился с кодом {proc.returncode}.\n```\n{tail}\n```",
-                                  parse_mode="Markdown")
+        update.message.reply_text(
+            f"❌ Скрипт завершился с кодом {proc.returncode}.\n```\n{tail}\n```",
+            parse_mode="Markdown",
+        )
         return
 
     if not OUT_PNG.exists():
-        update.message.reply_text("❌ Скрин не найден. Возможна блокировка Cloudflare.\n"
-                                  "Откройте скрипт локально без --headless, пройдите проверку 1 раз, "
-                                  "куки сохранятся в user-data.")
+        update.message.reply_text(
+            "❌ Скрин не найден. Возможно, блокировка Cloudflare.\n"
+            "Откройте скрипт локально без --headless, пройдите проверку 1 раз, "
+            "куки сохранятся в user-data."
+        )
         return
 
-    # Отправляем фото
+    # Отправляем картинку
     caption = f"Экономический календарь • {dt.datetime.now():%Y-%m-%d %H:%M}"
     with OUT_PNG.open("rb") as f:
-        context.bot.send_photo(chat_id=chat.id, photo=f, caption=caption)
+        context.bot.send_photo(chat_id=chat_id, photo=f, caption=caption)
+
 
 # Регистрируем команды
 dp.add_handler(CommandHandler("start", start))
@@ -128,6 +134,7 @@ dp.add_handler(CommandHandler("btc", btc))
 dp.add_handler(CommandHandler("eth", eth))
 dp.add_handler(CommandHandler("avax", avax))
 dp.add_handler(CommandHandler("calendar", calendar))
+
 
 # ===== FastAPI endpoints =====
 @app.get("/")
