@@ -1,61 +1,66 @@
 #!/usr/bin/env python3
-import argparse, time
+import argparse, os, time
+from pathlib import Path
+from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
 
 def parse_args():
     p = argparse.ArgumentParser(description="Full-page screenshot via Playwright")
-    p.add_argument("--url", required=True)
-    p.add_argument("--out", default="page.png")
-    p.add_argument("--wait", type=float, default=6.0)
-    p.add_argument("--timeout", type=int, default=45000)
-    p.add_argument("--headless", action="store_true")
-    p.add_argument("--user-data-dir", default=None)
-    p.add_argument("--user-agent", default=(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    ))
-    p.add_argument("--timezone", default="Etc/GMT")  # совпадает с tz в URL, при желании поменяйте
+    p.add_argument("--url", required=True, help="HTTP(S) URL или путь к локальному файлу (page.html)")
+    p.add_argument("--out", default="page.png", help="PNG файл для сохранения")
+    p.add_argument("--wait", type=float, default=6.0, help="Секунды подождать после загрузки")
+    p.add_argument("--timeout", type=int, default=45000, help="Таймаут загрузки, мс")
+    p.add_argument("--user-data-dir", default=None, help="Папка профиля (для куков)")
+    # Управление headless: по умолчанию True (на сервере), можно выключить локально через ENV HEADFUL=1
+    p.add_argument("--headless", action="store_true", help="Принудительно headless=True")
     return p.parse_args()
+
+def normalize_url(raw: str) -> str:
+    """Если это путь к существующему файлу — вернём file://… URI; иначе оставим как есть."""
+    parsed = urlparse(raw)
+    if parsed.scheme in ("http", "https", "file"):
+        return raw
+    # нет схемы — возможно, это локальный файл
+    p = Path(raw)
+    if p.exists():
+        return p.resolve().as_uri()  # file:///abs/path.html
+    # иначе это действительно невалидный URL/путь
+    raise ValueError(f"Invalid URL or file path: {raw}")
 
 def main():
     a = parse_args()
+    # headless по умолчанию True; локально можно выставить HEADFUL=1
+    headless = not (os.getenv("HEADFUL", "0") == "1")
+    if a.headless:
+        headless = True
+
+    target = normalize_url(a.url)
+
     with sync_playwright() as p:
-        launch_kwargs = dict(headless=a.headless, args=["--disable-dev-shm-usage"])
-        context = None
+        # важные флаги для контейнеров: no-sandbox, disable-dev-shm-usage
+        launch_kwargs = dict(headless=headless, args=["--disable-dev-shm-usage", "--no-sandbox"])
+        # (опционально) если грузите локальные ресурсы из file://, можно добавить:
+        # launch_kwargs["args"] += ["--allow-file-access-from-files"]
 
         if a.user_data_dir:
-            context = p.chromium.launch_persistent_context(
-                a.user_data_dir,
-                **launch_kwargs,
-                user_agent=a.user_agent,
-                locale="en-US",
-                timezone_id=a.timezone,
-                viewport={"width": 1600, "height": 1200},
-            )
-            page = context.new_page()
+            ctx = p.chromium.launch_persistent_context(a.user_data_dir, **launch_kwargs)
+            page = ctx.new_page()
         else:
             browser = p.chromium.launch(**launch_kwargs)
-            context = browser.new_context(
-                user_agent=a.user_agent,
-                locale="en-US",
-                timezone_id=a.timezone,
-                viewport={"width": 1600, "height": 1200},
-            )
-            page = context.new_page()
+            ctx = browser.new_context()
+            page = ctx.new_page()
 
         try:
-            page.goto(a.url, wait_until="networkidle", timeout=a.timeout)
+            page.goto(target, wait_until="networkidle", timeout=a.timeout)
         except PWTimeoutError:
             page.wait_for_load_state("domcontentloaded")
 
-        # иногда Cloudflare авто-проверка проходит сама — подождём чуть дольше
         if a.wait > 0:
             time.sleep(a.wait)
 
         page.screenshot(path=a.out, full_page=True)
         print(f"✅ saved: {a.out}")
-
-        context.close()
+        ctx.close()
 
 if __name__ == "__main__":
     main()
