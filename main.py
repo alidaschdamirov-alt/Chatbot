@@ -88,7 +88,7 @@ def calendar(update: Update, context: CallbackContext):
         "--out", str(OUT_PNG),
         "--wait", str(WAIT_SECONDS),
         "--user-data-dir", str(USER_DATA_DIR),
-        "--headless",
+        
     ]
 
     try:
