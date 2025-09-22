@@ -16,6 +16,7 @@ def parse_args():
     p.add_argument("--out", default="page.png", help="Куда сохранить PNG")
     p.add_argument("--wait", type=float, default=4.0, help="Секунд подождать после загрузки")
     p.add_argument("--timeout", type=int, default=35000, help="Таймаут загрузки, мс")
+    p.add_argument("--headless", action="store_true", help="Запуск без окна браузера")
     p.add_argument("--user-data-dir", default=None, help="Каталог для сохранения cookies (если нужен обход Cloudflare)")
     return p.parse_args()
 
