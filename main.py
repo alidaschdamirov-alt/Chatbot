@@ -23,7 +23,7 @@ USER_DATA_DIR = Path(__file__).with_name("user-data")
 
 # URL из вашего iframe (страница, которую надо сфотографировать)
 CALENDAR_URL = (
-    "page.html"
+    "file:///page.html"
   
 )
 
