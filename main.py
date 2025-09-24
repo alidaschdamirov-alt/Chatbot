@@ -28,7 +28,7 @@ CALENDAR_URL = (
 )
 
 # Тайминги для скриншота
-WAIT_SECONDS = os.environ.get("CAL_WAIT", "10")           # подождать после загрузки
+WAIT_SECONDS = os.environ.get("CAL_WAIT", "50")           # подождать после загрузки
 RUN_TIMEOUT = int(os.environ.get("CAL_TIMEOUT", "90"))   # таймаут выполнения, сек
 
 app = FastAPI()
