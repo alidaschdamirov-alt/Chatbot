@@ -33,17 +33,7 @@ RUN_TIMEOUT = int(os.environ.get("CAL_TIMEOUT", "90"))   # таймаут вып
 
 app = FastAPI()
 
-# ===== ВСТАВЛЯЕМ ВАШ /embed =====
-IFRAME_HTML = """
-<!doctype html><meta charset="utf-8">
-<style>html,body,iframe{margin:0;height:100%;width:100%;border:0;}</style>
-<iframe src="https://sslecal2.investing.com?columns=exc_flags,exc_currency,exc_importance,exc_actual,exc_forecast,exc_previous&category=_employment,_economicActivity,_inflation,_credit,_centralBanks,_confidenceIndex,_balance,_Bonds&importance=2,3&features=datepicker,timezone&countries=37,5&calType=week&timeZone=73&lang=1"></iframe>
-<div class="poweredBy" style="position:fixed;left:0;right:0;bottom:0;text-align:center;font:12px Arial;">Real Time Economic Calendar provided by <a href="https://www.investing.com/" target="_blank">Investing.com</a>.</div>
-"""
 
-@app.get("/embed", response_class=HTMLResponse)
-def embed():
-    return IFRAME_HTML
 
 # ===== Инициализация PTB (без polling) =====
 updater = Updater(BOT_TOKEN, use_context=True)
