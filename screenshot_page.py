@@ -51,7 +51,7 @@ def main():
             time.sleep(a.wait)
 
         # 🆕 Скроллим страницу вверх на 500px
-        page.evaluate("window.scrollBy(0, -500)")
+        page.evaluate("window.scrollBy(0, -1500)")
 
         page.screenshot(path=a.out, full_page=True)
         print(f"✅ saved: {a.out}")
