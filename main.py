@@ -23,7 +23,7 @@ USER_DATA_DIR = Path(__file__).with_name("user-data")
 
 # URL из вашего iframe (страница, которую надо сфотографировать)
 CALENDAR_URL = (
-    "https://www.investing.com/economic-calendar/s-p-global-composite-pmi-1492"
+    "https://www.investing.com/economic-calendar/cpi-68"
   
 )
 
