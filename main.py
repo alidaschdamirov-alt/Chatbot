@@ -23,7 +23,7 @@ OUT_PNG = Path(__file__).with_name("page.png")
 USER_DATA_DIR = Path(__file__).with_name("user-data")
 USER_DATA_DIR.mkdir(exist_ok=True)  # важно: чтобы Chromium мог туда писать
 
-CALENDAR_URL = os.environ.get("CAL_URL", "https://web-page-owvi.onrender.com/")
+CALENDAR_URL = os.environ.get("CAL_URL", "https://ru.investing.com/economic-calendar/unemployment-rate-300")
 
 WAIT_SECONDS = int(os.environ.get("CAL_WAIT", "20"))       # было 50
 RUN_TIMEOUT = int(os.environ.get("CAL_TIMEOUT", "60"))     # было 90
