@@ -29,7 +29,7 @@ USER_DATA_DIR = Path(__file__).with_name("user-data")
 # URL из вашего iframe (страница, которую надо сфотографировать)
 CALENDAR_URL = os.environ.get(
     "CAL_URL",
-    "https://www.investing.com/economic-calendar/cpi-68"
+    "https://web-page-owvi.onrender.com/"
 )
 
 # Тайминги для скриншота
