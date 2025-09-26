@@ -21,12 +21,12 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 SCRAPER = Path(__file__).with_name("screenshot_page.py")
 OUT_PNG = Path(__file__).with_name("page.png")
 USER_DATA_DIR = Path(__file__).with_name("user-data")
-USER_DATA_DIR.mkdir(exist_ok=True)  # важно: чтобы Chromium мог туда писать
+USER_DATA_DIR.mkdir(exist_ok=True)
 
 CALENDAR_URL = os.environ.get("CAL_URL", "https://ru.investing.com/economic-calendar/unemployment-rate-300")
 
-WAIT_SECONDS = int(os.environ.get("CAL_WAIT", "20"))       # было 50
-RUN_TIMEOUT = int(os.environ.get("CAL_TIMEOUT", "60"))     # было 90
+WAIT_SECONDS = int(os.environ.get("CAL_WAIT", "20"))      # можно менять через ENV
+RUN_TIMEOUT = int(os.environ.get("CAL_TIMEOUT", "150"))  # увеличил для тяжёлых страниц
 
 # ===== FastAPI app =====
 app = FastAPI(title="TG Bot Webhook + Screenshot")
@@ -34,19 +34,17 @@ app = FastAPI(title="TG Bot Webhook + Screenshot")
 # ===== PTB Application (v20+) =====
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# --- жизненный цикл: инициализация/останов ---
 @app.on_event("startup")
 async def _on_startup():
-    # Если вы выставляете вебхук через API вручную — ок.
-    # Иначе можно тут вызвать: await application.bot.set_webhook(url=..., secret_token=WEBHOOK_SECRET)
     await application.initialize()
+    await application.start()  # нужно для корректной работы application.bot
 
 @app.on_event("shutdown")
 async def _on_shutdown():
+    await application.stop()
     await application.shutdown()
 
-
-# ===== ХЭНДЛЕРЫ КОМАНД =====
+# ===== ХЭНДЛЕРЫ =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет! Я работаю на вебхуках 🤖\n"
@@ -65,14 +63,12 @@ async def eth(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def avax(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("AVAX: 🔺")
 
-
 async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
     if not SCRAPER.exists():
         await update.message.reply_text(
-            f"❌ Не найден скрипт: {SCRAPER.name}\n"
-            f"Создайте рядом файл screenshot_page.py (минимальный скрипт скрина)."
+            f"❌ Не найден {SCRAPER.name}. Создайте рядом screenshot_page.py"
         )
         return
 
@@ -88,17 +84,12 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sys.executable, str(SCRAPER),
         "--url", CALENDAR_URL,
         "--out", str(OUT_PNG),
-        "--wait", str(WAIT_SECONDS),
         "--user-data-dir", str(USER_DATA_DIR),
-        "--headless",
-        # РЕКОМЕНДУЕМ: прокинуть флаги экономии памяти внутрь скрипта,
-        # а в screenshot_page.py передать их в Chromium.
-        "--extra-chrome-flags=--disable-dev-shm-usage --no-sandbox --single-process --js-flags=--max-old-space-size=64",
+        "--wait-for", ".common-table",
+        "--wait-for", "table",
     ]
 
     loop = asyncio.get_running_loop()
-
-    # Пишем stdout/stderr в файл, чтобы не держать в памяти
     with tempfile.TemporaryDirectory() as td:
         log_path = Path(td) / "scraper.log"
         with log_path.open("w", encoding="utf-8") as lf:
@@ -121,12 +112,10 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
         if proc.returncode != 0:
-            tail = ""
             try:
-                content = log_path.read_text(encoding="utf-8", errors="ignore")
-                tail = content[-1800:]
+                tail = log_path.read_text(encoding="utf-8", errors="ignore")[-1800:]
             except Exception:
-                pass
+                tail = ""
             await update.message.reply_text(
                 f"❌ Скрипт завершился с кодом {proc.returncode}.<pre>{escape(tail)}</pre>",
                 parse_mode="HTML",
@@ -136,7 +125,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not OUT_PNG.exists():
         await update.message.reply_text(
             "❌ Скрин не найден. Возможно, блокировка Cloudflare.\n"
-            "Откройте скрипт локально без --headless, пройдите проверку 1 раз, "
+            "Откройте скрипт локально без headless, пройдите проверку, "
             "куки сохранятся в user-data."
         )
         return
@@ -145,7 +134,6 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with OUT_PNG.open("rb") as f:
         await context.bot.send_photo(chat_id=chat_id, photo=f, caption=caption)
 
-
 # Регистрируем команды
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_cmd))
@@ -153,7 +141,6 @@ application.add_handler(CommandHandler("btc", btc))
 application.add_handler(CommandHandler("eth", eth))
 application.add_handler(CommandHandler("avax", avax))
 application.add_handler(CommandHandler("calendar", calendar))
-
 
 # ===== FastAPI endpoints =====
 @app.get("/")
