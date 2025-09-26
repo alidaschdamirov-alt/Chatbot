@@ -1,18 +1,23 @@
 import os
+import sys
+import asyncio
 import subprocess
 import datetime as dt
 from pathlib import Path
+from html import escape
 
 from fastapi import FastAPI, Request, HTTPException
 from telegram import Update
-from telegram.ext import Updater, Dispatcher, CommandHandler, CallbackContext
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # ===== НАСТРОЙКИ =====
-BOT_TOKEN = os.environ.get("BOT_TOKEN") or "PUT_YOUR_TOKEN_HERE"
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "PUT_YOUR_TOKEN_HERE")
+if not BOT_TOKEN or BOT_TOKEN == "PUT_YOUR_TOKEN_HERE":
+    raise RuntimeError("Set BOT_TOKEN env")
+
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")  # если зададите, Telegram будет слать тот же secret_token
 
 # Минимальный скрипт, который делает полный скрин страницы (лежит рядом с этим файлом)
-# см. screenshot_page.py из предыдущего сообщения
 SCRAPER = Path(__file__).with_name("screenshot_page.py")
 
 # Куда сохраняем готовую картинку
@@ -22,50 +27,48 @@ OUT_PNG = Path(__file__).with_name("page.png")
 USER_DATA_DIR = Path(__file__).with_name("user-data")
 
 # URL из вашего iframe (страница, которую надо сфотографировать)
-CALENDAR_URL = (
-    "https://web-page-owvi.onrender.com/"
-  
+CALENDAR_URL = os.environ.get(
+    "CAL_URL",
+    "https://www.investing.com/economic-calendar/cpi-68"
 )
 
 # Тайминги для скриншота
-WAIT_SECONDS = os.environ.get("CAL_WAIT", "50")           # подождать после загрузки
-RUN_TIMEOUT = int(os.environ.get("CAL_TIMEOUT", "90"))   # таймаут выполнения, сек
+WAIT_SECONDS = int(os.environ.get("CAL_WAIT", "50"))          # подождать после загрузки
+RUN_TIMEOUT = int(os.environ.get("CAL_TIMEOUT", "90"))        # таймаут выполнения, сек
 
-app = FastAPI()
+# ===== FastAPI app =====
+app = FastAPI(title="TG Bot Webhook + Screenshot")
 
-
-
-# ===== Инициализация PTB (без polling) =====
-updater = Updater(BOT_TOKEN, use_context=True)
-dp: Dispatcher = updater.dispatcher
+# ===== PTB Application (v20+) =====
+application = ApplicationBuilder().token(BOT_TOKEN).build()
 
 
 # ===== ХЭНДЛЕРЫ КОМАНД =====
-def start(update: Update, context: CallbackContext):
-    update.message.reply_text(
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
         "Привет! Я работаю на вебхуках 🤖\n"
         "Команда: /calendar — пришлю скрин страницы календаря."
     )
 
-def help_cmd(update: Update, context: CallbackContext):
-    update.message.reply_text("Команды: /start /help /btc /eth /avax /calendar")
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Команды: /start /help /btc /eth /avax /calendar")
 
-def btc(update: Update, context: CallbackContext):
-    update.message.reply_text("BTC: 🟠")
+async def btc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("BTC: 🟠")
 
-def eth(update: Update, context: CallbackContext):
-    update.message.reply_text("ETH: 🔷")
+async def eth(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("ETH: 🔷")
 
-def avax(update: Update, context: CallbackContext):
-    update.message.reply_text("AVAX: 🔺")
+async def avax(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("AVAX: 🔺")
 
 
-def calendar(update: Update, context: CallbackContext):
+async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Запускает внешний скрипт скринера и отправляет PNG в чат."""
     chat_id = update.effective_chat.id
 
     if not SCRAPER.exists():
-        update.message.reply_text(
+        await update.message.reply_text(
             f"❌ Не найден скрипт: {SCRAPER.name}\n"
             f"Создайте рядом файл screenshot_page.py (минимальный скрипт скрина)."
         )
@@ -78,12 +81,12 @@ def calendar(update: Update, context: CallbackContext):
     except Exception:
         pass
 
-    update.message.reply_text("⏳ Делаю скрин страницы…")
+    await update.message.reply_text("⏳ Делаю скрин страницы…")
 
     # Команда запуска минимального скрипта скринера
     # ВАЖНО: screenshot_page.py поддерживает именно эти флаги
     cmd = [
-        "python", str(SCRAPER),
+        sys.executable, str(SCRAPER),
         "--url", CALENDAR_URL,
         "--out", str(OUT_PNG),
         "--wait", str(WAIT_SECONDS),
@@ -91,30 +94,33 @@ def calendar(update: Update, context: CallbackContext):
         "--headless",
     ]
 
+    loop = asyncio.get_running_loop()
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=RUN_TIMEOUT
+        # subprocess.run блокирующий — выносим в executor
+        proc = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                cmd, capture_output=True, text=True, timeout=RUN_TIMEOUT
+            )
         )
     except subprocess.TimeoutExpired:
-        update.message.reply_text("⏳ Время ожидания вышло. Попробуйте ещё раз.")
+        await update.message.reply_text("⏳ Время ожидания вышло. Попробуйте ещё раз.")
         return
     except Exception as e:
-        update.message.reply_text(f"⚠️ Ошибка запуска: {e}")
+        await update.message.reply_text(f"⚠️ Ошибка запуска: {e}")
         return
 
     if proc.returncode != 0:
-        tail = (proc.stderr or proc.stdout or "")[-2000:]
-        update.message.reply_text(
-            f"❌ Скрипт завершился с кодом {proc.returncode}.\n```\n{tail}\n```",
-            parse_mode="Markdown",
+        tail = (proc.stderr or proc.stdout or "")[-1800:]
+        # Безопасный HTML, чтобы не падать на разметке Telegram
+        await update.message.reply_text(
+            f"❌ Скрипт завершился с кодом {proc.returncode}.<pre>{escape(tail)}</pre>",
+            parse_mode="HTML",
         )
         return
 
     if not OUT_PNG.exists():
-        update.message.reply_text(
+        await update.message.reply_text(
             "❌ Скрин не найден. Возможно, блокировка Cloudflare.\n"
             "Откройте скрипт локально без --headless, пройдите проверку 1 раз, "
             "куки сохранятся в user-data."
@@ -124,16 +130,16 @@ def calendar(update: Update, context: CallbackContext):
     # Отправляем картинку
     caption = f"Экономический календарь • {dt.datetime.now():%Y-%m-%d %H:%M}"
     with OUT_PNG.open("rb") as f:
-        context.bot.send_photo(chat_id=chat_id, photo=f, caption=caption)
+        await context.bot.send_photo(chat_id=chat_id, photo=f, caption=caption)
 
 
 # Регистрируем команды
-dp.add_handler(CommandHandler("start", start))
-dp.add_handler(CommandHandler("help", help_cmd))
-dp.add_handler(CommandHandler("btc", btc))
-dp.add_handler(CommandHandler("eth", eth))
-dp.add_handler(CommandHandler("avax", avax))
-dp.add_handler(CommandHandler("calendar", calendar))
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("help", help_cmd))
+application.add_handler(CommandHandler("btc", btc))
+application.add_handler(CommandHandler("eth", eth))
+application.add_handler(CommandHandler("avax", avax))
+application.add_handler(CommandHandler("calendar", calendar))
 
 
 # ===== FastAPI endpoints =====
@@ -150,6 +156,6 @@ async def telegram_webhook(request: Request):
             raise HTTPException(status_code=401, detail="bad secret token")
 
     data = await request.json()
-    update = Update.de_json(data, dp.bot)
-    dp.process_update(update)
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
     return {"ok": True}

@@ -1,55 +1,73 @@
-#!/usr/bin/env python3
-# screenshot_page.py — скрин страницы + умный скролл (страница/контейнер/iframe)
-# Поддержка: wheel/PageDown/End, прокрутка по времени, финальная пауза дорисовки.
-
-import argparse, os, time, sys
+import asyncio
+import argparse
 from pathlib import Path
-from urllib.parse import urlparse
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
 
-# ----------------------------- CLI -----------------------------
-def parse_args():
-    p = argparse.ArgumentParser(description="Full-page screenshot via Playwright (скролл: страница/контейнер/iframe, wheel, PageDown)")
-    p.add_argument("--url", required=True, help="HTTP(S) URL или путь к локальному файлу (page.html)")
-    p.add_argument("--out", default="page.png", help="PNG файл для сохранения")
-    p.add_argument("--wait", type=float, default=6.0, help="Секунды подождать после загрузки")
-    p.add_argument("--timeout", type=int, default=45000, help="Таймаут загрузки, мс")
-    p.add_argument("--user-data-dir", default=None, help="Папка профиля (для куков)")
-    p.add_argument("--headless", action="store_true", help="Принудительно headless=True")
-    p.add_argument("--viewport-width", type=int, default=1440, help="Ширина окна браузера")
-    p.add_argument("--viewport-height", type=int, default=900, help="Высота окна браузера")
+from playwright.async_api import async_playwright
 
-    # Основные режимы скролла
-    p.add_argument("--scroll", type=int, default=0, help="Прокрутить на N px (плюс — вниз, минус — вверх)")
-    p.add_argument("--scroll-bottom", action="store_true", help="Плавно прокрутить до самого низа")
 
-    # Где скроллить
-    p.add_argument("--scroll-target-selector", default=None, help="CSS селектор скроллируемого контейнера (если не body/html)")
-    p.add_argument("--frame-url-substr", default=None, help="Подстрока URL iframe, внутри которого нужно скроллить (напр. 'tradingview.com')")
-    p.add_argument("--frame-selector", default=None, help="CSS селектор iframe (альтернатива frame-url-substr)")
+async def take_screenshot(url: str, out_png: Path, wait_seconds: int,
+                          user_data_dir: Path, headless: bool):
+    """
+    Делает полноэкранный скрин страницы.
+    - user_data_dir: persistent context (куки/локальное хранилище сохраняются).
+    - headless: можно снять галку при первичном обходе Cloudflare в локальном запуске.
+    """
+    user_data_dir.mkdir(parents=True, exist_ok=True)
 
-    # Фоллбэки, если обычный скролл не работает
-    p.add_argument("--wheel", type=int, default=0, help="Имитация прокрутки колёсиком (суммарно deltaY). Работает и в iframe.")
-    p.add_argument("--page-downs", type=int, default=0, help="Сколько раз нажать PageDown внутри цели")
-    p.add_argument("--press-end", action="store_true", help="Нажать End внутри цели (в самый низ)")
+    async with async_playwright() as p:
+        # Запускаем persistent context (как полноценный профиль браузера)
+        browser = await p.chromium.launch_persistent_context(
+            user_data_dir=str(user_data_dir),
+            headless=headless,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--window-size=1920,1080",
+            ],
+        )
 
-    # Прокрутка по времени + финальная пауза дорисовки
-    p.add_argument("--wheel-run-secs", type=float, default=0.0, help="Сколько секунд непрерывно крутить колесо вниз")
-    p.add_argument("--idle-secs", type=float, default=2.0, help="Пауза после прокрутки для дорисовки данных")
+        try:
+            page = await browser.new_page()
+            await page.set_viewport_size({"width": 1920, "height": 1080})
 
-    # Снять блокировки скролла
-    p.add_argument("--unlock-overflow", action="store_true", help="Снять overflow:hidden у html/body")
-    return p.parse_args()
+            # Бывает полезно задать user agent
+            await page.set_extra_http_headers({
+                "Accept-Language": "en-US,en;q=0.9,ru;q=0.8"
+            })
 
-# ----------------------------- Utils -----------------------------
-def normalize_url(raw: str) -> str:
-    parsed = urlparse(raw)
-    if parsed.scheme in ("http", "https", "file"):
-        return raw
-    p = Path(raw)
-    if p.exists():
-        return p.resolve().as_uri()
-    raise ValueError(f"Invalid URL or file path: {raw}")
+            # Загружаем страницу и ждём сетевую тишину
+            resp = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            if not resp or resp.status >= 400:
+                # пробуем ещё дождаться networkidle для тяжелых страниц
+                await page.wait_for_load_state("networkidle", timeout=60000)
+
+            # Дополнительное ожидание от окружения
+            if wait_seconds > 0:
+                await asyncio.sleep(wait_seconds)
+
+            # Скролл до низа, чтобы прогрузить ленивые блоки (если есть)
+            await page.evaluate(
+                """() => new Promise(resolve => {
+                    let h = 0;
+                    const step = 600;
+                    const id = setInterval(() => {
+                        window.scrollBy(0, step);
+                        h += step;
+                        if (h > document.body.scrollHeight * 1.2) {
+                            clearInterval(id); resolve();
+                        }
+                    }, 200);
+                })"""
+            )
+            # Немного подождать после скролла
+            await asyncio.sleep(1.2)
+
+            # Скрин всей страницы
+            await page.screenshot(path=str(out_png), full_page=True)
+        finally:
+            await browser.close()
+
 
 def get_iframe_handle(page, frame_url_substr=None, frame_selector=None):
     if frame_selector:
@@ -216,101 +234,37 @@ def keyboard_scroll(page, iframe_el, page_downs: int = 0, press_end: bool = Fals
 
 # ----------------------------- Main -----------------------------
 def main():
-    a = parse_args()
-    headless = not (os.getenv("HEADFUL", "0") == "1")
-    if a.headless:
+    parser = argparse.ArgumentParser(description="Full page screenshot via Playwright")
+    parser.add_argument("--url", required=True, help="URL страницы")
+    parser.add_argument("--out", required=True, help="Куда сохранить PNG")
+    parser.add_argument("--wait", default="5", help="Ожидание после загрузки, сек")
+    parser.add_argument("--user-data-dir", default="./user-data", help="Папка профиля браузера")
+    parser.add_argument("--headless", action="store_true", help="Режим без интерфейса")
+    parser.add_argument("--headed", action="store_true", help="Принудительно с интерфейсом (debug)")
+
+    args = parser.parse_args()
+    out_png = Path(args.out)
+    user_data_dir = Path(args.user_data_dir)
+
+    # приоритет флагов: --headed перекрывает --headless
+    headless = True
+    if args.headed:
+        headless = False
+    elif args.headless:
         headless = True
 
-    target = normalize_url(a.url)
+    wait_seconds = int(args.wait)
 
-    with sync_playwright() as p:
-        args = ["--disable-dev-shm-usage", "--no-sandbox"]
-        if a.user_data_dir:
-            ctx = p.chromium.launch_persistent_context(
-                a.user_data_dir, headless=headless, args=args,
-                viewport={"width": a.viewport_width, "height": a.viewport_height}
-            )
-            page = ctx.new_page()
-            browser = None
-        else:
-            browser = p.chromium.launch(headless=headless, args=args)
-            ctx = browser.new_context(viewport={"width": a.viewport_width, "height": a.viewport_height})
-            page = ctx.new_page()
+    asyncio.run(
+        take_screenshot(
+            url=args.url,
+            out_png=out_png,
+            wait_seconds=wait_seconds,
+            user_data_dir=user_data_dir,
+            headless=headless,
+        )
+    )
 
-        try:
-            page.goto(target, wait_until="networkidle", timeout=a.timeout)
-        except PWTimeoutError:
-            page.wait_for_load_state("domcontentloaded")
-
-        if a.wait > 0:
-            time.sleep(a.wait)
-
-        if a.unlock_overflow:
-            unlock_overflow_styles(page)
-
-        # ---- Определяем цель скролла: страница или iframe ----
-        iframe_el = get_iframe_handle(page, a.frame_url_substr, a.frame_selector)
-
-        # ---- Обычные способы (evaluate) ----
-        if a.scroll != 0 or a.scroll_bottom:
-            target_selector = a.scroll_target_selector
-            # если целевого фрейма нет — подберём контейнер
-            if not target_selector and not iframe_el:
-                target_selector = pick_scroll_target_selector(page)
-
-            try:
-                if a.scroll != 0:
-                    if iframe_el:
-                        # Внутри TradingView обычно лучше сразу фоллбэки (колесо/клавиши)
-                        pass
-                    else:
-                        if target_selector:
-                            ok = scroll_element(page, target_selector, a.scroll)
-                            if not ok: scroll_in_page(page, a.scroll)
-                        else:
-                            scroll_in_page(page, a.scroll)
-
-                if a.scroll_bottom:
-                    if iframe_el:
-                        pass  # для iframe ниже используем фоллбэки
-                    else:
-                        scroll_to_bottom_smart(page, selector=target_selector)
-            except Exception:
-                pass  # перейдём к фоллбэкам
-
-        # ---- Фоллбэки (для TradingView/iframe): колесо и/или клавиатура ----
-        used_fallback = False
-        if a.wheel != 0:
-            used_fallback |= wheel_over(page, iframe_el, a.wheel)
-        if a.page_downs or a.press_end:
-            keyboard_scroll(page, iframe_el, page_downs=a.page_downs, press_end=a.press_end)
-            used_fallback = True
-
-        # Прокрутка по времени (самый надёжный способ для бесконечных лент)
-        if a.wheel_run_secs and a.wheel_run_secs > 0:
-            wheel_for_seconds(page, iframe_el, a.wheel_run_secs)
-            used_fallback = True
-
-        # Если просили scroll-bottom и обычные способы не сработали — нажмём End и чуть «докрутим»
-        if a.scroll_bottom and not used_fallback:
-            keyboard_scroll(page, iframe_el, page_downs=0, press_end=True)
-            time.sleep(0.5)
-            wheel_over(page, iframe_el, 8000)
-
-        # Финальная пауза на дорисовку данных/скелетонов
-        if a.idle_secs and a.idle_secs > 0:
-            time.sleep(a.idle_secs)
-
-        # ---- Скриншот ----
-        page.screenshot(path=a.out, full_page=True)
-        print(f"✅ saved: {a.out}")
-
-        ctx.close()
-        if browser: browser.close()
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"❌ Error: {e}", file=sys.stderr)
-        sys.exit(1)
+    main()
