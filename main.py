@@ -23,13 +23,13 @@ USER_DATA_DIR = Path(__file__).with_name("user-data")
 
 # URL из вашего iframe (страница, которую надо сфотографировать)
 CALENDAR_URL = (
-    "https://ru.investing.com/economic-calendar/trade-balance-286"
+    "https://www.investing.com/economic-calendar/s-p-global-composite-pmi-1492"
   
 )
 
 # Тайминги для скриншота
-WAIT_SECONDS = os.environ.get("CAL_WAIT", "50")           # подождать после загрузки
-RUN_TIMEOUT = int(os.environ.get("CAL_TIMEOUT", "90"))   # таймаут выполнения, сек
+WAIT_SECONDS = os.environ.get("CAL_WAIT", "10")           # подождать после загрузки
+RUN_TIMEOUT = int(os.environ.get("CAL_TIMEOUT", "30"))   # таймаут выполнения, сек
 
 app = FastAPI()
 
