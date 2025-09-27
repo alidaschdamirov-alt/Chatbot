@@ -1,7 +1,7 @@
 import base64
 from pathlib import Path
 
-def analyze_calendar_image_openai(png_path: Path, api_key: str, model="gpt-4o-mini") -> str:
+def analyze_calendar_image_openai(png_path: Path, api_key: str, model="gpt-5") -> str:
     if not api_key:
         return "ℹ️ Анализ отключён: OPENAI_API_KEY не задан."
     try:
@@ -28,8 +28,8 @@ def analyze_calendar_image_openai(png_path: Path, api_key: str, model="gpt-4o-mi
                     {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}" }},
                 ]}
             ],
-            temperature=0.2,
-            max_tokens=600,
+           
+            max_tokens=1000,
         )
         return (resp.choices[0].message.content or "").strip()
     except Exception as e:
