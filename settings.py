@@ -17,7 +17,7 @@ class Settings:
         self.USER_DATA_DIR.mkdir(exist_ok=True)
 
         self.CALENDAR_URL = os.environ.get(
-            "CAL_URL", "https://ru.investing.com/economic-calendar/unemployment-rate-300"
+            "CAL_URL", "https://web-page-owvi.onrender.com/"
         )
         self.RUN_TIMEOUT = int(os.environ.get("CAL_TIMEOUT", "150"))
         self.WAIT_FOR = [".common-table", "table"]
