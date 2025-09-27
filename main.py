@@ -107,7 +107,7 @@ async def analyze_calendar_image(png_path: Path) -> str:
                     ],
                 },
             ],
-            temperature=0.2,
+            temperature=1,
             max_completion_tokens=600,
         )
         return resp.choices[0].message.content.strip()
