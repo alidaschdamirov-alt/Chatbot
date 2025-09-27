@@ -9,6 +9,7 @@ from settings import settings
 from idempotency import chat_lock
 from screenshot_service import build_scraper_cmd, run_scraper
 from ai_analysis import analyze_calendar_image_openai
+from utils_telegram import send_table_or_text
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Привет! Используй /calendar, чтобы получить скрин и анализ.")
@@ -75,14 +76,14 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 2) анализ
         if settings.OPENAI_API_KEY:
             await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-            # ⬇️ ИСПРАВЛЕНО: анализ тоже в executor, чтобы не блокировать event loop
             analysis = await loop.run_in_executor(
                 None, lambda: analyze_calendar_image_openai(settings.OUT_PNG, settings.OPENAI_API_KEY)
             )
-            await context.bot.send_message(chat_id=chat_id, text=analysis)
+            await send_table_or_text(chat_id, context, analysis)   # <-- вот это
         else:
             await context.bot.send_message(
-                chat_id=chat_id, text="ℹ️ Анализ отключён: задайте OPENAI_API_KEY."
+                chat_id=chat_id,
+                text="ℹ️ Анализ отключён: задайте OPENAI_API_KEY."
             )
 
 def register_handlers(app):
