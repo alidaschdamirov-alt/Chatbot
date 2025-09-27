@@ -93,7 +93,7 @@ async def analyze_calendar_image(png_path: Path) -> str:
 
         # Используем визуальную модель; gpt-4o-mini обычно достаточно, можно заменить на более мощную.
         resp = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5",
             messages=[
                 {"role": "system", "content": system_msg},
                 {
