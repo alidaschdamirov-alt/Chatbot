@@ -26,7 +26,7 @@ EXTRACTION_USER_PROMPT = (
 def analyze_calendar_image_openai(
     png_path: Path,
     api_key: str,
-    model: str = "gpt-4o",
+    model: str = "gpt-4o-mini",
 ) -> str:
     if not api_key:
         return "ℹ️ Анализ отключён: OPENAI_API_KEY не задан."
@@ -52,6 +52,7 @@ def analyze_calendar_image_openai(
                 },
             ],
             
+            temperature=0.0,
             max_tokens=800,
         )
 
