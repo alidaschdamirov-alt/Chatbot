@@ -8,6 +8,7 @@ from html import escape
 import tempfile
 import time
 from collections import OrderedDict, defaultdict
+import base64
 
 from fastapi import FastAPI, Request, HTTPException
 from telegram import Update
@@ -19,6 +20,7 @@ if not BOT_TOKEN or BOT_TOKEN == "PUT_YOUR_TOKEN_HERE":
     raise RuntimeError("Set BOT_TOKEN env")
 
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")  # обязателен для анализа
 
 SCRAPER = Path(__file__).with_name("screenshot_page.py")
 OUT_PNG = Path(__file__).with_name("page.png")
@@ -29,27 +31,24 @@ CALENDAR_URL = os.environ.get("CAL_URL", "https://ru.investing.com/economic-cale
 RUN_TIMEOUT = int(os.environ.get("CAL_TIMEOUT", "150"))  # таймаут подпроцесса
 
 # ===== ИДЕМПОТЕНТНОСТЬ & ЛОКИ =====
-SEEN_TTL = 600  # сек хранить update_id (10 минут)
+SEEN_TTL = 600  # сек хранить update_id
 SEEN_MAX = 2000
 _seen_updates: "OrderedDict[int, float]" = OrderedDict()  # update_id -> ts
 _chat_locks: "defaultdict[int, asyncio.Lock]" = defaultdict(asyncio.Lock)
 
 def remember_update(update_id: int) -> bool:
-    """True если это НОВЫЙ update_id; False если уже видели (дубликат)."""
     now = time.time()
-    # удалить протухшие
     while _seen_updates and now - next(iter(_seen_updates.values())) > SEEN_TTL:
         _seen_updates.popitem(last=False)
     if update_id in _seen_updates:
         return False
     _seen_updates[update_id] = now
-    # не раздувать память
     while len(_seen_updates) > SEEN_MAX:
         _seen_updates.popitem(last=False)
     return True
 
-# ===== FastAPI app & PTB =====
-app = FastAPI(title="TG Bot Webhook + Screenshot")
+# ===== FastAPI & PTB =====
+app = FastAPI(title="TG Bot Webhook + Screenshot + Analysis")
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 
 @app.on_event("startup")
@@ -62,11 +61,63 @@ async def _on_shutdown():
     await application.stop()
     await application.shutdown()
 
+# ===== ВСПОМОГАТЕЛЬНОЕ: Анализ изображения через OpenAI =====
+async def analyze_calendar_image(png_path: Path) -> str:
+    """
+    Возвращает краткий анализ в текстовом виде.
+    Темы: ставка ФРС, влияние на крипту, индекс доллара (DXY), акции (S&P/Nasdaq).
+    """
+    if not OPENAI_API_KEY:
+        return "⚠️ OPENAI_API_KEY не задан — анализ отключён."
+
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=OPENAI_API_KEY)
+
+        with png_path.open("rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+
+        system_msg = (
+            "Ты — макроаналитик. По скриншоту экономического календаря: "
+            "1) коротко выдели ключевые события/релизы (время, важность). "
+            "2) оцени, как они могут повлиять на решение ФРС по ставке "
+            "(через призму инфляции/рынка труда/активности). "
+            "3) дай краткие ожидания по BTC/крипто, индексу доллара (DXY) и акциям (S&P/Nasdaq). "
+            "4) отметь ключевые риски/альтернативные сценарии. "
+            "Кратко, структурировано, без инвестиционных советов."
+        )
+        user_prompt = (
+            "Сделай выводы по скриншоту. Формат:\n"
+            "• Ключевые релизы\n• Ставка ФРС: импликации\n• BTC/крипто\n• DXY\n• Акции (S&P/Nasdaq)\n• Риски"
+        )
+
+        # Используем визуальную модель; gpt-4o-mini обычно достаточно, можно заменить на более мощную.
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_msg},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{b64}"}
+                        },
+                    ],
+                },
+            ],
+            temperature=0.2,
+            max_tokens=600,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        return f"⚠️ Ошибка анализа: {e}"
+
 # ===== ХЭНДЛЕРЫ =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Я работаю на вебхуках 🤖\n"
-        "Команда: /calendar — пришлю скрин страницы календаря."
+        "Привет! Команда: /calendar — пришлю скрин календаря и краткий анализ (ФРС, крипта, DXY, акции)."
     )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -85,16 +136,14 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     lock = _chat_locks[chat_id]
 
-    # предотвращаем повторный запуск, если предыдущий ещё идёт
     if lock.locked():
-        await update.message.reply_text("⏳ Уже делаю предыдущий скрин. Подождите пару секунд…")
+        await update.message.reply_text("⏳ Уже делаю предыдущий скрин. Подождите…")
         return
 
     if not SCRAPER.exists():
         await update.message.reply_text(f"❌ Не найден {SCRAPER.name}. Положите рядом screenshot_page.py")
         return
 
-    # всё внутри лока
     async with lock:
         try:
             if OUT_PNG.exists():
@@ -153,11 +202,23 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        # 1) отправляем фото
         caption = f"Экономический календарь • {dt.datetime.now():%Y-%m-%d %H:%M}"
         with OUT_PNG.open("rb") as f:
             await context.bot.send_photo(chat_id=chat_id, photo=f, caption=caption)
 
-# регистрируем команды
+        # 2) делаем анализ (если есть ключ)
+        if OPENAI_API_KEY:
+            await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+            analysis = await analyze_calendar_image(OUT_PNG)
+            await context.bot.send_message(chat_id=chat_id, text=analysis)
+        else:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="ℹ️ Анализ отключён: задайте переменную окружения OPENAI_API_KEY."
+            )
+
+# Регистрация команд
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_cmd))
 application.add_handler(CommandHandler("btc", btc))
@@ -176,12 +237,11 @@ async def telegram_webhook(request: Request):
     data = await request.json()
     update = Update.de_json(data, application.bot)
 
-    # --- ИДЕМПОТЕНТНОСТЬ ---
+    # идемпотентность
     if not remember_update(update.update_id):
-        # дубликат — подтверждаем и выходим
         return {"ok": True}
 
-    # обрабатываем в фоне, чтобы ответить Telegram сразу (без 499/повторов)
+    # обрабатываем в фоне, чтобы сразу вернуть OK (без 499)
     asyncio.create_task(application.process_update(update))
     return {"ok": True}
 
