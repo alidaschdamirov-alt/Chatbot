@@ -28,7 +28,7 @@ EXTRACTION_USER_PROMPT = (
 def analyze_calendar_image_openai(
     png_path: Path,
     api_key: str,
-    model: str = "gpt-4o-mini",
+    model: str = "gpt-5",
 ) -> str:
     """
     Возвращает ТОЛЬКО Markdown-таблицу с колонками:
@@ -59,8 +59,8 @@ def analyze_calendar_image_openai(
                     ],
                 },
             ],
-            temperature=0.0,
-            max_tokens=800,
+            
+            max_tokens=1000,
         )
 
         content = (resp.choices[0].message.content or "").strip()
