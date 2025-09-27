@@ -60,7 +60,7 @@ def analyze_calendar_image_openai(
                 },
             ],
             
-            max_tokens=1000,
+            max_completion_tokens=1000,
         )
 
         content = (resp.choices[0].message.content or "").strip()
