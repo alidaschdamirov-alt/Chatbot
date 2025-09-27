@@ -1,8 +1,10 @@
-import sys, tempfile, datetime as dt
+# bot_handlers.py
+import sys, tempfile, datetime as dt, asyncio
 from html import escape
 from pathlib import Path
 from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler
+
 from settings import settings
 from idempotency import chat_lock
 from screenshot_service import build_scraper_cmd, run_scraper
@@ -33,38 +35,55 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     async with lock:
         await update.message.reply_text("🧑‍💻 Делаю скрин страницы…")
-        cmd = build_scraper_cmd(sys.executable, settings.SCRAPER, settings.CALENDAR_URL, settings.OUT_PNG, settings.USER_DATA_DIR, settings.WAIT_FOR)
+        cmd = build_scraper_cmd(
+            sys.executable, settings.SCRAPER, settings.CALENDAR_URL,
+            settings.OUT_PNG, settings.USER_DATA_DIR, settings.WAIT_FOR
+        )
 
         with tempfile.TemporaryDirectory() as td:
             log_path = Path(td) / "scraper.log"
             try:
-                proc = await context.application.run_in_executor(None, lambda: run_scraper(cmd, settings.RUN_TIMEOUT, log_path))
+                # ⬇️ ИСПРАВЛЕНО: используем asyncio.get_running_loop().run_in_executor
+                loop = asyncio.get_running_loop()
+                proc = await loop.run_in_executor(
+                    None, lambda: run_scraper(cmd, settings.RUN_TIMEOUT, log_path)
+                )
             except Exception as e:
                 await update.message.reply_text(f"⚠️ Ошибка запуска: {e}")
                 return
+
             if proc.returncode != 0:
-                tail = log_path.read_text(encoding="utf-8", errors="ignore")[-1500:]
-                await update.message.reply_text(f"❌ Ошибка скрина<pre>{escape(tail)}</pre>", parse_mode="HTML")
+                tail = ""
+                try:
+                    tail = log_path.read_text(encoding="utf-8", errors="ignore")[-1500:]
+                except Exception:
+                    pass
+                await update.message.reply_text(
+                    f"❌ Ошибка скрина<pre>{escape(tail)}</pre>", parse_mode="HTML"
+                )
                 return
 
         if not settings.OUT_PNG.exists():
             await update.message.reply_text("❌ Скрин не получен, возможно защита сайта.")
             return
 
-        # Фото
+        # 1) фото
         caption = f"Экономический календарь • {dt.datetime.now():%Y-%m-%d %H:%M}"
         with settings.OUT_PNG.open("rb") as f:
             await context.bot.send_photo(chat_id=chat_id, photo=f, caption=caption)
 
-        # Анализ
+        # 2) анализ
         if settings.OPENAI_API_KEY:
             await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-            analysis = await context.application.run_in_executor(
+            # ⬇️ ИСПРАВЛЕНО: анализ тоже в executor, чтобы не блокировать event loop
+            analysis = await loop.run_in_executor(
                 None, lambda: analyze_calendar_image_openai(settings.OUT_PNG, settings.OPENAI_API_KEY)
             )
             await context.bot.send_message(chat_id=chat_id, text=analysis)
         else:
-            await context.bot.send_message(chat_id=chat_id, text="ℹ️ Анализ отключён: задайте OPENAI_API_KEY.")
+            await context.bot.send_message(
+                chat_id=chat_id, text="ℹ️ Анализ отключён: задайте OPENAI_API_KEY."
+            )
 
 def register_handlers(app):
     app.add_handler(CommandHandler("start", start))
