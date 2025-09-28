@@ -1,151 +1,149 @@
 # screenshot_page.py
-import argparse, asyncio, time
+import argparse, asyncio, time, sys
 from pathlib import Path
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
+from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
-# Настройки по умолчанию
-NAV_TIMEOUT = 120_000          # 120с
-SEL_TIMEOUT = 120_000
-FULLPAGE_SCROLL_PAUSE = 350    # мс между скроллами
-RETRIES = 3                    # число попыток goto
+NAV_TIMEOUT = 45_000
+SEL_TIMEOUT = 25_000
+RETRIES = 2
+FULLPAGE_SCROLL_PAUSE = 280
+
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+      "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
 
-# Под конкретную страницу выберите один из селекторов ниже или передайте через --wait-for
-DEFAULT_WAIT_SELECTORS = [
-    "#economicCalendar",                      # пример общий
-    ".common-table",                          # таблица на investing
-    "[data-test=calendar-table]",             # возможный data-test
-    "table",                                  # запасной
+# набор разумных селекторов для investing (можно дополнять через --wait-for)
+DEFAULT_SELECTORS = [
+    "#onetrust-accept-btn-handler",                 # cookie banner
+    "text=U.S. Unemployment Rate",                  # заголовок страницы
+    "table.genTbl",                                 # общие таблицы сайта
+    ".common-table", "table",                       # запасные
 ]
 
 async def gentle_scroll(page):
-    last_height = await page.evaluate("() => document.body.scrollHeight")
+    last = await page.evaluate("() => document.body.scrollHeight")
     while True:
         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         await asyncio.sleep(FULLPAGE_SCROLL_PAUSE/1000)
-        new_height = await page.evaluate("() => document.body.scrollHeight")
-        if new_height == last_height:
+        new = await page.evaluate("() => document.body.scrollHeight")
+        if new == last:
             break
-        last_height = new_height
+        last = new
 
-async def goto_with_retries(page, url: str, referrer: str | None = None):
+async def maybe_click(page, selector, timeout=4000):
+    try:
+        btn = page.locator(selector).first
+        await btn.wait_for(state="visible", timeout=timeout)
+        await btn.click(timeout=timeout)
+        print(f"[click] {selector}")
+        return True
+    except Exception:
+        return False
+
+async def goto_with_retries(page, url: str):
     last_err = None
-    for attempt in range(1, RETRIES + 1):
+    for attempt in range(1, RETRIES+1):
         try:
             print(f"[goto] attempt {attempt} -> {url}")
-            await page.goto(
-                url,
-                wait_until="domcontentloaded",  # НЕ networkidle
-                timeout=NAV_TIMEOUT,
-                referer=referrer,
-            )
+            await page.goto(url, wait_until="load", timeout=NAV_TIMEOUT)
             return
-        except PlaywrightTimeout as e:
+        except Exception as e:
             last_err = e
-            print(f"[goto] timeout on attempt {attempt}: {e}")
-            # маленькая пауза и твёрдый reload как альтернатива
-            await asyncio.sleep(1.5 * attempt)
+            print(f"[goto] fail #{attempt}: {e}")
+            await asyncio.sleep(1.0*attempt)
             try:
                 await page.reload(wait_until="load", timeout=NAV_TIMEOUT)
                 return
-            except Exception as re:
-                print(f"[reload] failed after attempt {attempt}: {re}")
-    raise last_err
+            except Exception as e2:
+                last_err = e2
+    if last_err:
+        raise last_err
 
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", required=True)
     ap.add_argument("--out", default="page.png")
     ap.add_argument("--width", type=int, default=1366)
-    ap.add_argument("--height", type=int, default=768)
-    ap.add_argument("--user-data-dir", default=None)  # для persistent контекста
-    ap.add_argument("--wait-for", action="append", help="CSS селектор(ы) для ожидания")
-    ap.add_argument("--lang", default="ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7")
+    ap.add_argument("--height", type=int, default=1100)
+    ap.add_argument("--user-data-dir", default=None)
+    ap.add_argument("--wait-for", action="append", help="доп. CSS-селектор(ы) для мягкого ожидания")
+    ap.add_argument("--sleep-ms", type=int, default=1500, help="пауза после load")
     args = ap.parse_args()
 
-    wait_selectors = args.wait_for or DEFAULT_WAIT_SELECTORS
     out_path = Path(args.out)
+    wait_selectors = (args.wait_for or []) + DEFAULT_SELECTORS
 
     async with async_playwright() as pw:
-        browser_type = pw.chromium
-
+        bt = pw.chromium
         launch_kwargs = dict(
             headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
+            args=["--disable-blink-features=AutomationControlled",
+                  "--no-sandbox", "--disable-dev-shm-usage"],
         )
 
-        # persistent context — лучше переживает Cloudflare (куки сохраняются)
+        # persistent context сохраняет куки (важно для investing/cf)
         if args.user_data_dir:
-            context = await browser_type.launch_persistent_context(
+            context = await bt.launch_persistent_context(
                 args.user_data_dir,
                 **launch_kwargs,
                 user_agent=UA,
-                locale="ru-RU",
+                locale="en-US",
                 viewport={"width": args.width, "height": args.height},
-                extra_http_headers={
-                    "Accept-Language": args.lang,
-                    "Upgrade-Insecure-Requests": "1",
-                },
+                extra_http_headers={"Accept-Language": "en-US,en;q=0.9,ru;q=0.6"},
             )
             page = context.pages[0] if context.pages else await context.new_page()
         else:
-            browser = await browser_type.launch(**launch_kwargs)
+            browser = await bt.launch(**launch_kwargs)
             context = await browser.new_context(
                 user_agent=UA,
-                locale="ru-RU",
+                locale="en-US",
                 viewport={"width": args.width, "height": args.height},
-                extra_http_headers={
-                    "Accept-Language": args.lang,
-                    "Upgrade-Insecure-Requests": "1",
-                },
+                extra_http_headers={"Accept-Language": "en-US,en;q=0.9,ru;q=0.6"},
             )
             page = await context.new_page()
 
-        # лёгкая «маскировка» автомации (часто помогает против челленджа)
+        # простые анти-бот скрипты
         await page.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            window.chrome = { runtime: {} };
-            Object.defineProperty(navigator, 'languages', {get: () => ['ru-RU','ru','en-US','en']});
-            Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+            Object.defineProperty(navigator,'webdriver',{get:()=>undefined});
+            window.chrome={runtime:{}};
+            Object.defineProperty(navigator,'languages',{get:()=>['en-US','en']});
+            Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4]});
         """)
 
-        # Навигация с ретраями
+        # навигация
         await goto_with_retries(page, args.url)
 
-        # Доп. ожидание конкретного контента (любой из списка)
+        # закрыть cookie баннер, если есть
+        await maybe_click(page, "#onetrust-accept-btn-handler", 5000)
+
+        # иногда всплывает баннер авторизации
+        await maybe_click(page, "button[aria-label='Close']", 2000)
+        await maybe_click(page, ".popupCloseIcon", 2000)
+
+        # мягкое ожидание нужных блоков (но не критично)
         found = False
-        start = time.time()
         for sel in wait_selectors:
             try:
                 await page.wait_for_selector(sel, timeout=SEL_TIMEOUT, state="visible")
-                print(f"[wait] visible selector: {sel}")
+                print(f"[wait] visible: {sel}")
                 found = True
                 break
-            except PlaywrightTimeout:
-                print(f"[wait] not found: {sel}")
+            except PWTimeout:
                 continue
 
-        if not found:
-            # как минимум дождёмся полной стадии 'load', но без networkidle
-            try:
-                await page.wait_for_load_state("load", timeout=SEL_TIMEOUT//2)
-            except Exception:
-                pass
-            print(f"[warn] ни один селектор не найден за {time.time()-start:.1f}s — делаем скрин как есть")
-
-        # Прокрутка для ленивых таблиц
+        # пауза после load и лёгкий скролл
+        if args.sleep_ms > 0:
+            await asyncio.sleep(args.sleep_ms/1000)
         await gentle_scroll(page)
 
-        # Скрин
+        # делаем скрин в любом случае
         await page.screenshot(path=str(out_path), full_page=True)
         print(f"[ok] saved screenshot -> {out_path.resolve()}")
 
         await context.close()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        print(f"[fatal] {e}", file=sys.stderr)
+        sys.exit(1)
