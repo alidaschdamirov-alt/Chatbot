@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import sys
-import tempfile
 import datetime as dt
 import asyncio
 from html import escape
@@ -79,7 +78,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(f"🧑‍💻 Делаю скрин:\n{url}")
 
-        # Команда для скриншота (через build_scraper_cmd)
+        # Команда для скриншота
         cmd = build_scraper_cmd(
             python_exec=sys.executable,
             scraper=settings.SCRAPER,
@@ -91,47 +90,50 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         loop = asyncio.get_running_loop()
-        with tempfile.TemporaryDirectory() as td:
-            log_path = Path(td) / "scraper.log"
+
+        # Лог в постоянный путь (на всякий случай)
+        log_path = Path("/var/data/batch") / "calendar_scraper.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            proc = await loop.run_in_executor(
+                None, lambda: run_scraper(cmd, settings.RUN_TIMEOUT, log_path)
+            )
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ Ошибка запуска: {e}")
+            return
+
+        if proc.returncode != 0:
+            # подробный хвост лога
+            tail = ""
             try:
-                proc = await loop.run_in_executor(
-                    None, lambda: run_scraper(cmd, settings.RUN_TIMEOUT, log_path)
-                )
-            except Exception as e:
-                await update.message.reply_text(f"⚠️ Ошибка запуска: {e}")
-                return
+                tail = log_path.read_text(encoding="utf-8", errors="ignore")[-3000:]
+            except Exception:
+                pass
 
-            if proc.returncode != 0:
-                # подробный хвост лога
-                tail = ""
-                try:
-                    tail = log_path.read_text(encoding="utf-8", errors="ignore")[-3000:]
-                except Exception:
-                    pass
+            # попытаемся выдернуть пути к debug-дампам, которые пишет screenshot_page.py
+            html_match = search(r"\[dump(?:-on-error)?\] html -> (.+?\.html)", tail)
+            png_match1 = search(r"\[ok\] saved debug screenshot -> (.+?\.png)", tail)
+            png_match2 = search(r"\[dump-on-error\] html=.+, png=(.+?\.png)", tail)
+            png_path_str = png_match1.group(1) if png_match1 else (png_match2.group(1) if png_match2 else None)
 
-                # попытаемся выдернуть пути к debug-дампам, которые пишет screenshot_page.py
-                html_match = search(r"\[dump(?:-on-error)?\] html -> (.+?\.html)", tail)
-                png_match1 = search(r"\[ok\] saved debug screenshot -> (.+?\.png)", tail)
-                png_match2 = search(r"\[dump-on-error\] html=.+, png=(.+?\.png)", tail)
-                png_path_str = png_match1.group(1) if png_match1 else (png_match2.group(1) if png_match2 else None)
-
-                await update.message.reply_text(
-                    f"❌ Ошибка скринера (код {proc.returncode}).\n<pre>{escape(tail[-1800:])}</pre>",
-                    parse_mode="HTML",
-                )
-                # отправим дампы, если существуюют
-                try:
-                    if html_match:
-                        hp = Path(html_match.group(1))
-                        if hp.exists():
-                            await context.bot.send_document(chat_id=chat_id, document=hp.open("rb"), filename=hp.name)
-                    if png_path_str:
-                        pp = Path(png_path_str)
-                        if pp.exists():
-                            await context.bot.send_photo(chat_id=chat_id, photo=pp.open("rb"), caption="debug screenshot")
-                except Exception:
-                    pass
-                return
+            await update.message.reply_text(
+                f"❌ Ошибка скринера (код {proc.returncode}).\n<pre>{escape(tail[-1800:])}</pre>",
+                parse_mode="HTML",
+            )
+            # отправим дампы, если существуют
+            try:
+                if html_match:
+                    hp = Path(html_match.group(1))
+                    if hp.exists():
+                        await context.bot.send_document(chat_id=chat_id, document=hp.open("rb"), filename=hp.name)
+                if png_path_str:
+                    pp = Path(png_path_str)
+                    if pp.exists():
+                        await context.bot.send_photo(chat_id=chat_id, photo=pp.open("rb"), caption="debug screenshot")
+            except Exception:
+                pass
+            return
 
         if not settings.OUT_PNG.exists():
             await update.message.reply_text(
@@ -181,60 +183,80 @@ async def batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts: list[str] = []
         loop = asyncio.get_running_loop()
 
-        with tempfile.TemporaryDirectory() as td:
-            tmpdir = Path(td)
+        # Пишем артефакты в постоянный путь
+        save_dir = Path("/var/data/batch")
+        save_dir.mkdir(parents=True, exist_ok=True)
 
-            for idx, url in enumerate(urls, start=1):
-                out_png = tmpdir / f"page_{idx:02d}.png"
-                log_path = tmpdir / f"scraper_{idx:02d}.log"
+        for idx, url in enumerate(urls, start=1):
+            out_png = save_dir / f"page_{idx:02d}.png"
+            log_path = save_dir / f"scraper_{idx:02d}.log"
 
-                # 1) захват
-                try:
-                    proc = await loop.run_in_executor(
-                        None,
-                        lambda: capture_page(
-                            sys.executable, settings.SCRAPER, url, out_png,
-                            settings.USER_DATA_DIR, settings.WAIT_FOR, settings.SLEEP_MS,
-                            settings.RUN_TIMEOUT, log_path
-                        ),
-                    )
-                    ok = proc.returncode == 0 and out_png.exists()
-                except Exception as e:
-                    ok = False
-
-                if not ok:
-                    # приложим краткий блок с пометкой ошибки
-                    tail = ""
-                    try:
-                        tail = log_path.read_text(encoding="utf-8", errors="ignore")[-800:]
-                    except Exception:
-                        pass
-                    header = f"| Источник {idx}: {url} |\n|---|"
-                    table = "| Показатель | Факт | Прогноз | Предыдущий |\n|---|---:|---:|---:|\n| Ошибка захвата |  |  |  |"
-                    if tail:
-                        table = (
-                            "| Показатель | Факт | Прогноз | Предыдущий |\n"
-                            "|---|---:|---:|---:|\n"
-                            f"| Ошибка: {escape(tail)[:200]} |  |  |  |"
-                        )
-                    parts.append(header + "\n" + table)
-                    sleep_ms(settings.BATCH_SLEEP_MS)
-                    continue
-
-                # 2) извлечение
-                table = await loop.run_in_executor(
-                    None, lambda: analyze_calendar_image_openai(out_png, settings.OPENAI_API_KEY)
+            # 1) захват
+            try:
+                proc = await loop.run_in_executor(
+                    None,
+                    lambda: capture_page(
+                        sys.executable, settings.SCRAPER, url, out_png,
+                        settings.USER_DATA_DIR, settings.WAIT_FOR, settings.SLEEP_MS,
+                        settings.RUN_TIMEOUT, log_path
+                    ),
                 )
-                if not table.strip().startswith("|"):
-                    table = (
-                        "| Показатель | Факт | Прогноз | Предыдущий |\n"
-                        "|---|---:|---:|---:|\n"
-                        "| Нет распознаваемых показателей |  |  |  |"
-                    )
+                ok = proc.returncode == 0 and out_png.exists()
+            except Exception:
+                ok = False
+
+            if not ok:
+                # прочитаем хвост лога
+                tail = ""
+                try:
+                    tail = log_path.read_text(encoding="utf-8", errors="ignore")[-3000:]
+                except Exception:
+                    pass
+
+                # попробуем вытащить пути к дампам
+                html_match = search(r"\[dump(?:-on-error)?\] html -> (.+?\.html)", tail)
+                png_match1 = search(r"\[ok\] saved debug screenshot -> (.+?\.png)", tail)
+                png_match2 = search(r"\[dump-on-error\] html=.+, png=(.+?\.png)", tail)
+                png_path_str = png_match1.group(1) if png_match1 else (png_match2.group(1) if png_match2 else None)
+
                 header = f"| Источник {idx}: {url} |\n|---|"
+                table = (
+                    "| Показатель | Факт | Прогноз | Предыдущий |\n"
+                    "|---|---:|---:|---:|\n"
+                    f"| Ошибка: {escape(tail[-1000:])} |  |  |  |"
+                )
                 parts.append(header + "\n" + table)
 
+                # отправим артефакты этой итерации (если есть)
+                try:
+                    if html_match:
+                        hp = Path(html_match.group(1))
+                        if hp.exists():
+                            await context.bot.send_document(chat_id=chat_id, document=hp.open("rb"), filename=f"debug_{idx}.html")
+                    if png_path_str:
+                        pp = Path(png_path_str)
+                        if pp.exists():
+                            await context.bot.send_photo(chat_id=chat_id, photo=pp.open("rb"), caption=f"debug screenshot {idx}")
+                except Exception:
+                    pass
+
                 sleep_ms(settings.BATCH_SLEEP_MS)
+                continue
+
+            # 2) извлечение
+            table = await loop.run_in_executor(
+                None, lambda: analyze_calendar_image_openai(out_png, settings.OPENAI_API_KEY)
+            )
+            if not table.strip().startswith("|"):
+                table = (
+                    "| Показатель | Факт | Прогноз | Предыдущий |\n"
+                    "|---|---:|---:|---:|\n"
+                    "| Нет распознаваемых показателей |  |  |  |"
+                )
+            header = f"| Источник {idx}: {url} |\n|---|"
+            parts.append(header + "\n" + table)
+
+            sleep_ms(settings.BATCH_SLEEP_MS)
 
         big = "\n\n".join(parts)
         await send_table_or_text(chat_id, context, big)
