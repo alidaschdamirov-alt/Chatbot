@@ -7,6 +7,7 @@ import datetime as dt
 import asyncio
 from html import escape
 from pathlib import Path
+from re import search
 
 from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler
@@ -16,8 +17,8 @@ from idempotency import chat_lock
 from screenshot_service import (
     build_scraper_cmd,
     run_scraper,
-    capture_page,   # утилита-обёртка (если нет — можно заменить на build_scraper_cmd+run_scraper)
-    sleep_ms,       # короткая пауза между страницами
+    capture_page,
+    sleep_ms,
 )
 from ai_analysis import analyze_calendar_image_openai
 from utils_telegram import send_table_or_text
@@ -28,8 +29,8 @@ from utils_telegram import send_table_or_text
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет! Я умею:\n"
-        "• /calendar — сделать скрин, извлечь таблицу показателей и прислать\n"
-        "• /batch — собрать таблицы с заданного списка страниц (CAL_URLS)\n"
+        "• /calendar — сделать скрин первой страницы из списка (CAL_URLS), извлечь таблицу показателей и прислать\n"
+        "• /batch — собрать таблицы со ВСЕХ страниц из CAL_URLS одним сообщением\n"
         "Дополнительно доступны /btc /eth /avax /help"
     )
 
@@ -37,8 +38,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Команды:\n"
-        "• /calendar — скрин + извлечение таблицы (Actual/Forecast/Previous)\n"
-        "• /batch — пройтись по списку CAL_URLS и вернуть все таблицы одним сообщением\n"
+        "• /calendar — скрин + извлечение таблицы (Actual / Forecast / Previous)\n"
+        "• /batch — пройтись по всем URL из CAL_URLS и вернуть все таблицы одним сообщением\n"
         "• /btc /eth /avax — тестовые команды\n"
     )
 
@@ -55,7 +56,7 @@ async def avax(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("AVAX: 🔺")
 
 
-# ---------- Одна страница: скрин + анализ ----------
+# ---------- Одна страница: скрин + извлечение ----------
 
 async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -65,68 +66,89 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⏳ Уже выполняется предыдущая задача…")
         return
 
+    # Берём первую ссылку из списка CAL_URLS как «дефолтную» для /calendar
+    url = settings.BATCH_URLS[0]
+
     async with lock:
-        # на всякий случай уберём старый файл
+        # подчистим возможный старый файл
         try:
             if settings.OUT_PNG.exists():
                 settings.OUT_PNG.unlink()
         except Exception:
             pass
 
-        await update.message.reply_text("🧑‍💻 Делаю скрин страницы…")
+        await update.message.reply_text(f"🧑‍💻 Делаю скрин:\n{url}")
 
-        # Команда для скриншота
+        # Команда для скриншота (через build_scraper_cmd)
         cmd = build_scraper_cmd(
             python_exec=sys.executable,
             scraper=settings.SCRAPER,
-            url=settings.BATCH_URLS[0],  # берём ПЕРВУЮ страницу из списка как «основную»
+            url=url,
             out_png=settings.OUT_PNG,
             user_data_dir=settings.USER_DATA_DIR,
             wait_for=settings.WAIT_FOR,
             sleep_ms=settings.SLEEP_MS,
         )
 
-        # Запуск подпроцесса в executor
         loop = asyncio.get_running_loop()
         with tempfile.TemporaryDirectory() as td:
             log_path = Path(td) / "scraper.log"
             try:
                 proc = await loop.run_in_executor(
-                    None,
-                    lambda: run_scraper(cmd, settings.RUN_TIMEOUT, log_path),
+                    None, lambda: run_scraper(cmd, settings.RUN_TIMEOUT, log_path)
                 )
             except Exception as e:
                 await update.message.reply_text(f"⚠️ Ошибка запуска: {e}")
                 return
 
             if proc.returncode != 0:
-                # прикрепим хвост лога — удобно дебажить
+                # подробный хвост лога
                 tail = ""
                 try:
-                    tail = log_path.read_text(encoding="utf-8", errors="ignore")[-1500:]
+                    tail = log_path.read_text(encoding="utf-8", errors="ignore")[-3000:]
                 except Exception:
                     pass
+
+                # попытаемся выдернуть пути к debug-дампам, которые пишет screenshot_page.py
+                html_match = search(r"\[dump(?:-on-error)?\] html -> (.+?\.html)", tail)
+                png_match1 = search(r"\[ok\] saved debug screenshot -> (.+?\.png)", tail)
+                png_match2 = search(r"\[dump-on-error\] html=.+, png=(.+?\.png)", tail)
+                png_path_str = png_match1.group(1) if png_match1 else (png_match2.group(1) if png_match2 else None)
+
                 await update.message.reply_text(
-                    f"❌ Ошибка скринера (код {proc.returncode}).<pre>{escape(tail)}</pre>",
+                    f"❌ Ошибка скринера (код {proc.returncode}).\n<pre>{escape(tail[-1800:])}</pre>",
                     parse_mode="HTML",
                 )
+                # отправим дампы, если существуюют
+                try:
+                    if html_match:
+                        hp = Path(html_match.group(1))
+                        if hp.exists():
+                            await context.bot.send_document(chat_id=chat_id, document=hp.open("rb"), filename=hp.name)
+                    if png_path_str:
+                        pp = Path(png_path_str)
+                        if pp.exists():
+                            await context.bot.send_photo(chat_id=chat_id, photo=pp.open("rb"), caption="debug screenshot")
+                except Exception:
+                    pass
                 return
 
         if not settings.OUT_PNG.exists():
-            await update.message.reply_text("❌ Скрин не получен (возможна защита сайта).")
+            await update.message.reply_text(
+                "❌ Скрин не получен (возможна защита сайта / cookie баннер)."
+            )
             return
 
-        # 1) фото
+        # 1) отправляем фото
         caption = f"Экономический календарь • {dt.datetime.now():%Y-%m-%d %H:%M}"
         with settings.OUT_PNG.open("rb") as f:
             await context.bot.send_photo(chat_id=chat_id, photo=f, caption=caption)
 
-        # 2) извлечение таблицы
+        # 2) извлекаем таблицу через OpenAI (если ключ задан)
         if settings.OPENAI_API_KEY:
             await context.bot.send_chat_action(chat_id=chat_id, action="typing")
             table = await loop.run_in_executor(
-                None,
-                lambda: analyze_calendar_image_openai(settings.OUT_PNG, settings.OPENAI_API_KEY),
+                None, lambda: analyze_calendar_image_openai(settings.OUT_PNG, settings.OPENAI_API_KEY)
             )
             await send_table_or_text(chat_id, context, table)
         else:
@@ -135,7 +157,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
 
-# ---------- Батч по конкретному списку URL-ов ----------
+# ---------- Батч: несколько страниц из CAL_URLS ----------
 
 async def batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -151,10 +173,12 @@ async def batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Список CAL_URLS пуст.")
         return
 
-    await update.message.reply_text(f"🚀 Стартую сбор с {total} страниц. Это может занять несколько минут…")
+    await update.message.reply_text(
+        f"🚀 Стартую сбор с {total} страниц. Это может занять несколько минут…"
+    )
 
     async with lock:
-        combined_parts: list[str] = []
+        parts: list[str] = []
         loop = asyncio.get_running_loop()
 
         with tempfile.TemporaryDirectory() as td:
@@ -164,7 +188,7 @@ async def batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 out_png = tmpdir / f"page_{idx:02d}.png"
                 log_path = tmpdir / f"scraper_{idx:02d}.log"
 
-                # — 1) скрин
+                # 1) захват
                 try:
                     proc = await loop.run_in_executor(
                         None,
@@ -177,10 +201,9 @@ async def batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ok = proc.returncode == 0 and out_png.exists()
                 except Exception as e:
                     ok = False
-                    err = str(e)
 
                 if not ok:
-                    # читаем хвост лога, если есть
+                    # приложим краткий блок с пометкой ошибки
                     tail = ""
                     try:
                         tail = log_path.read_text(encoding="utf-8", errors="ignore")[-800:]
@@ -189,36 +212,35 @@ async def batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     header = f"| Источник {idx}: {url} |\n|---|"
                     table = "| Показатель | Факт | Прогноз | Предыдущий |\n|---|---:|---:|---:|\n| Ошибка захвата |  |  |  |"
                     if tail:
-                        table = f"| Показатель | Факт | Прогноз | Предыдущий |\n|---|---:|---:|---:|\n| Ошибка: {escape(tail)[:200]} |  |  |  |"
-                    combined_parts.append(header + "\n" + table)
+                        table = (
+                            "| Показатель | Факт | Прогноз | Предыдущий |\n"
+                            "|---|---:|---:|---:|\n"
+                            f"| Ошибка: {escape(tail)[:200]} |  |  |  |"
+                        )
+                    parts.append(header + "\n" + table)
                     sleep_ms(settings.BATCH_SLEEP_MS)
                     continue
 
-                # — 2) извлечение таблицы
+                # 2) извлечение
                 table = await loop.run_in_executor(
-                    None,
-                    lambda: analyze_calendar_image_openai(out_png, settings.OPENAI_API_KEY),
+                    None, lambda: analyze_calendar_image_openai(out_png, settings.OPENAI_API_KEY)
                 )
-
                 if not table.strip().startswith("|"):
                     table = (
                         "| Показатель | Факт | Прогноз | Предыдущий |\n"
                         "|---|---:|---:|---:|\n"
                         "| Нет распознаваемых показателей |  |  |  |"
                     )
-
                 header = f"| Источник {idx}: {url} |\n|---|"
-                combined_parts.append(header + "\n" + table)
+                parts.append(header + "\n" + table)
 
-                # — 3) пауза между страницами
                 sleep_ms(settings.BATCH_SLEEP_MS)
 
-        # — 4) финальная склейка и отправка
-        big = "\n\n".join(combined_parts)
+        big = "\n\n".join(parts)
         await send_table_or_text(chat_id, context, big)
 
 
-# ---------- Регистрация хендлеров ----------
+# ---------- Регистрация ----------
 
 def register_handlers(app):
     app.add_handler(CommandHandler("start", start))

@@ -1,22 +1,26 @@
 # screenshot_page.py
 import argparse, asyncio, time, sys
 from pathlib import Path
+from datetime import datetime
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
 NAV_TIMEOUT = 45_000
-SEL_TIMEOUT = 25_000
+SEL_TIMEOUT = 20_000
 RETRIES = 2
 FULLPAGE_SCROLL_PAUSE = 280
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
 
-# набор разумных селекторов для investing (можно дополнять через --wait-for)
-DEFAULT_SELECTORS = [
-    "#onetrust-accept-btn-handler",                 # cookie banner
-    "text=U.S. Unemployment Rate",                  # заголовок страницы
-    "table.genTbl",                                 # общие таблицы сайта
-    ".common-table", "table",                       # запасные
+COOKIE_SELECTORS = [
+    "#onetrust-accept-btn-handler",                # Onetrust (часто на investing)
+    "text=Accept All", "text=I Accept",            # англ. варианты
+    "[data-qa-id='accept-all']",
+]
+
+POPUP_SELECTORS = [
+    "button[aria-label='Close']", ".popupCloseIcon",
+    ".closeBtn", ".close", ".icon-close",
 ]
 
 async def gentle_scroll(page):
@@ -29,11 +33,11 @@ async def gentle_scroll(page):
             break
         last = new
 
-async def maybe_click(page, selector, timeout=4000):
+async def maybe_click(page, selector, timeout=3000):
     try:
-        btn = page.locator(selector).first
-        await btn.wait_for(state="visible", timeout=timeout)
-        await btn.click(timeout=timeout)
+        loc = page.locator(selector).first
+        await loc.wait_for(state="visible", timeout=timeout)
+        await loc.click(timeout=timeout)
         print(f"[click] {selector}")
         return True
     except Exception:
@@ -44,14 +48,18 @@ async def goto_with_retries(page, url: str):
     for attempt in range(1, RETRIES+1):
         try:
             print(f"[goto] attempt {attempt} -> {url}")
-            await page.goto(url, wait_until="load", timeout=NAV_TIMEOUT)
+            resp = await page.goto(url, wait_until="load", timeout=NAV_TIMEOUT)
+            code = resp.status if resp else "n/a"
+            print(f"[goto] status={code}")
             return
         except Exception as e:
             last_err = e
             print(f"[goto] fail #{attempt}: {e}")
             await asyncio.sleep(1.0*attempt)
             try:
-                await page.reload(wait_until="load", timeout=NAV_TIMEOUT)
+                resp = await page.reload(wait_until="load", timeout=NAV_TIMEOUT)
+                code = resp.status if resp else "n/a"
+                print(f"[reload] status={code}")
                 return
             except Exception as e2:
                 last_err = e2
@@ -65,12 +73,15 @@ async def main():
     ap.add_argument("--width", type=int, default=1366)
     ap.add_argument("--height", type=int, default=1100)
     ap.add_argument("--user-data-dir", default=None)
-    ap.add_argument("--wait-for", action="append", help="доп. CSS-селектор(ы) для мягкого ожидания")
-    ap.add_argument("--sleep-ms", type=int, default=1500, help="пауза после load")
+    ap.add_argument("--wait-for", action="append")
+    ap.add_argument("--sleep-ms", type=int, default=1500)
     args = ap.parse_args()
 
     out_path = Path(args.out)
-    wait_selectors = (args.wait_for or []) + DEFAULT_SELECTORS
+    debug_dir = out_path.parent
+    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    debug_html = debug_dir / f"debug_{stamp}.html"
+    debug_png  = debug_dir / f"debug_{stamp}.png"
 
     async with async_playwright() as pw:
         bt = pw.chromium
@@ -79,29 +90,24 @@ async def main():
             args=["--disable-blink-features=AutomationControlled",
                   "--no-sandbox", "--disable-dev-shm-usage"],
         )
-
-        # persistent context сохраняет куки (важно для investing/cf)
         if args.user_data_dir:
             context = await bt.launch_persistent_context(
                 args.user_data_dir,
                 **launch_kwargs,
-                user_agent=UA,
-                locale="en-US",
+                user_agent=UA, locale="en-US",
                 viewport={"width": args.width, "height": args.height},
-                extra_http_headers={"Accept-Language": "en-US,en;q=0.9,ru;q=0.6"},
+                extra_http_headers={"Accept-Language":"en-US,en;q=0.9,ru;q=0.6"},
             )
             page = context.pages[0] if context.pages else await context.new_page()
         else:
             browser = await bt.launch(**launch_kwargs)
             context = await browser.new_context(
-                user_agent=UA,
-                locale="en-US",
+                user_agent=UA, locale="en-US",
                 viewport={"width": args.width, "height": args.height},
-                extra_http_headers={"Accept-Language": "en-US,en;q=0.9,ru;q=0.6"},
+                extra_http_headers={"Accept-Language":"en-US,en;q=0.9,ru;q=0.6"},
             )
             page = await context.new_page()
 
-        # простые анти-бот скрипты
         await page.add_init_script("""
             Object.defineProperty(navigator,'webdriver',{get:()=>undefined});
             window.chrome={runtime:{}};
@@ -109,41 +115,47 @@ async def main():
             Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4]});
         """)
 
-        # навигация
-        await goto_with_retries(page, args.url)
+        try:
+            await goto_with_retries(page, args.url)
 
-        # закрыть cookie баннер, если есть
-        await maybe_click(page, "#onetrust-accept-btn-handler", 5000)
+            # cookies / popups
+            for sel in COOKIE_SELECTORS:
+                await maybe_click(page, sel, 4000)
+            for sel in POPUP_SELECTORS:
+                await maybe_click(page, sel, 1500)
 
-        # иногда всплывает баннер авторизации
-        await maybe_click(page, "button[aria-label='Close']", 2000)
-        await maybe_click(page, ".popupCloseIcon", 2000)
+            # мягкая пауза и скролл
+            if args.sleep_ms > 0:
+                await asyncio.sleep(args.sleep_ms/1000)
+            await gentle_scroll(page)
 
-        # мягкое ожидание нужных блоков (но не критично)
-        found = False
-        for sel in wait_selectors:
+            # сохранить HTML для диагностики
             try:
-                await page.wait_for_selector(sel, timeout=SEL_TIMEOUT, state="visible")
-                print(f"[wait] visible: {sel}")
-                found = True
-                break
-            except PWTimeout:
-                continue
+                html = await page.content()
+                debug_html.write_text(html, encoding="utf-8", errors="ignore")
+                print(f"[dump] html -> {debug_html}")
+            except Exception as e:
+                print(f"[dump] html fail: {e}")
 
-        # пауза после load и лёгкий скролл
-        if args.sleep_ms > 0:
-            await asyncio.sleep(args.sleep_ms/1000)
-        await gentle_scroll(page)
+            # делаем скрин в любом случае
+            await page.screenshot(path=str(out_path), full_page=True)
+            await page.screenshot(path=str(debug_png), full_page=True)
+            print(f"[ok] saved screenshot -> {out_path}")
+            print(f"[ok] saved debug screenshot -> {debug_png}")
 
-        # делаем скрин в любом случае
-        await page.screenshot(path=str(out_path), full_page=True)
-        print(f"[ok] saved screenshot -> {out_path.resolve()}")
-
-        await context.close()
+            await context.close()
+        except Exception as e:
+            # при фатальной ошибке попробуем хоть что-то сохранить
+            try:
+                html = await page.content()
+                debug_html.write_text(html, encoding="utf-8", errors="ignore")
+                await page.screenshot(path=str(debug_png), full_page=True)
+                print(f"[dump-on-error] html={debug_html}, png={debug_png}")
+            except Exception:
+                pass
+            print(f"[fatal] {e}", file=sys.stderr)
+            sys.exit(1)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        print(f"[fatal] {e}", file=sys.stderr)
-        sys.exit(1)
+    import asyncio as _a
+    _a.run(main())
