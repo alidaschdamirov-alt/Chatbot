@@ -18,7 +18,7 @@ class Settings:
         self.APP_DIR = Path(__file__).resolve().parent
         self.SCRAPER = self.APP_DIR / "screenshot_page.py"
         self.OUT_PNG = self.APP_DIR / "page.png"
-        self.USER_DATA_DIR = self.APP_DIR / "user-data"
+        self.USER_DATA_DIR = Path("/var/data/user-data")
         self.USER_DATA_DIR.mkdir(exist_ok=True)
 
         # === ССЫЛКИ ДЛЯ СКРИНОВ ===
