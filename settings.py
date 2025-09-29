@@ -41,12 +41,12 @@ class Settings:
         )
 
         # пауза после load перед скрином (мс)
-        self.SLEEP_MS = int(os.environ.get("CAL_SLEEP_MS", "2000"))  # 2 секунды
+        self.SLEEP_MS = int(os.environ.get("CAL_SLEEP_MS", "3000"))  # 2 секунды
 
         # пауза между страницами (batch mode)
-        self.BATCH_SLEEP_MS = int(os.environ.get("BATCH_SLEEP_MS", "250"))
+        self.BATCH_SLEEP_MS = int(os.environ.get("BATCH_SLEEP_MS", "350"))
 
         # общий таймаут работы скрипта (сек)
-        self.RUN_TIMEOUT = int(os.environ.get("CAL_TIMEOUT", "150"))
+        self.RUN_TIMEOUT = int(os.environ.get("CAL_TIMEOUT", "250"))
 
 settings = Settings()
