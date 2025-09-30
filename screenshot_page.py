@@ -125,7 +125,7 @@ async def _core(args, out_path: Path, debug_html: Path, debug_png: Path):
         # Небольшая "облегчалка": режем тяжёлое/трекеры (картинки не трогаем)
         await context.route("**/*", lambda route: (
             route.abort()
-            if route.request.resource_type in {"media", "font"}
+            if route.request.resource_type in {"media"}
                or "doubleclick" in route.request.url
                or "googletag" in route.request.url
             else route.continue_()
