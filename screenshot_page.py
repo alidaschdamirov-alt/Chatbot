@@ -10,21 +10,17 @@ from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 # Таймауты и попытки
 NAV_TIMEOUT = 30_000     # навигация до DOMContentLoaded
 SEL_TIMEOUT = 15_000     # ожидание селекторов
-RETRIES     = 1          # меньше ретраев -> быстрее фэйл
+RETRIES     = 1          # меньше ретраев -> быстрее фейл
+GLOBAL_TIMEOUT = 95      # общий лимит работы скрипта (сек). ДОЛЖЕН быть < RUN_TIMEOUT у подпроцесса
 
-# Глобальный сторож выполнения всего скрипта (должен быть меньше RUN_TIMEOUT у подпроцесса)
-GLOBAL_TIMEOUT = 95      # секунд
-
-# User-Agent
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/122.0.0.0 Safari/537.36"
 )
 
-# Селекторы для кликов
 COOKIE_SELECTORS = [
-    "#onetrust-accept-btn-handler",     # Onetrust (Investing)
+    "#onetrust-accept-btn-handler",
     "text=Accept All",
     "text=I Accept",
     "[data-qa-id='accept-all']",
@@ -67,10 +63,9 @@ async def goto_with_retries(page, url: str):
     for attempt in range(1, RETRIES + 1):
         try:
             print(f"[goto] attempt {attempt} -> {url}")
-            resp = await page.goto(url, wait_until="domcontentloaded", timeout= NAV_TIMEOUT)
+            resp = await page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
             code = resp.status if resp else "n/a"
             print(f"[goto] status={code}")
-            # мягкая попытка дождаться networkidle (не критично)
             try:
                 await page.wait_for_load_state("networkidle", timeout=5000)
             except Exception:
@@ -95,7 +90,7 @@ async def _core(args, out_path: Path, debug_html: Path, debug_png: Path):
             ],
         )
 
-        # persistent-профиль (куки) предпочтительнее
+        # persistent-профиль — куки/сторедж сохраняются между запусками
         if args.user_data_dir:
             context = await bt.launch_persistent_context(
                 args.user_data_dir,
@@ -122,7 +117,7 @@ async def _core(args, out_path: Path, debug_html: Path, debug_png: Path):
             )
             page = await context.new_page()
 
-        # Небольшая "облегчалка": режем тяжёлое/трекеры (картинки не трогаем)
+        # Лёгкая фильтрация: режем медиа и трекеры (шрифты НЕ режем!)
         await context.route("**/*", lambda route: (
             route.abort()
             if route.request.resource_type in {"media"}
@@ -131,12 +126,34 @@ async def _core(args, out_path: Path, debug_html: Path, debug_png: Path):
             else route.continue_()
         ))
 
-        # Небольшой анти-бот
+        # Маленький анти-бот (webdriver/languages/plugins)
         await page.add_init_script("""
             Object.defineProperty(navigator,'webdriver',{get:()=>undefined});
             window.chrome={runtime:{}};
             Object.defineProperty(navigator,'languages',{get:()=>['en-US','en']});
             Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4]});
+        """)
+
+        # ПАТЧ ожидания шрифтов: делаем document.fonts "мгновенно загруженным"
+        await context.add_init_script("""
+        (() => {
+          try {
+            const loadedFonts = {
+              ready: Promise.resolve(),
+              status: 'loaded',
+              addEventListener() {},
+              removeEventListener() {},
+              load() { return Promise.resolve([]); }
+            };
+            const desc = Object.getOwnPropertyDescriptor(Document.prototype, 'fonts');
+            if (!desc || desc.configurable) {
+              Object.defineProperty(Document.prototype, 'fonts', {
+                get() { return loadedFonts; },
+                configurable: true
+              });
+            }
+          } catch (e) {}
+        })();
         """)
 
         # Навигация
@@ -161,7 +178,7 @@ async def _core(args, out_path: Path, debug_html: Path, debug_png: Path):
             except PWTimeout:
                 continue
 
-        # Сколлим — для ленивых таблиц
+        # Сколлим, чтобы ленивые блоки подгрузились
         await gentle_scroll(page)
 
         # Сохранить HTML-дамп (для диагностики)
@@ -172,9 +189,9 @@ async def _core(args, out_path: Path, debug_html: Path, debug_png: Path):
         except Exception as e:
             print(f"[dump] html fail: {e}")
 
-        # Скрин (в любом случае)
-        await page.screenshot(path=str(out_path), full_page=True)
-        await page.screenshot(path=str(debug_png), full_page=True)
+        # Скриншоты (рабочий и debug)
+        await page.screenshot(path=str(out_path), full_page=True, timeout=20000)
+        await page.screenshot(path=str(debug_png), full_page=True, timeout=20000)
         print(f"[ok] saved screenshot -> {out_path}")
         print(f"[ok] saved debug screenshot -> {debug_png}")
 
@@ -202,15 +219,11 @@ async def main():
     try:
         await asyncio.wait_for(_core(args, out_path, debug_html, debug_png), timeout=GLOBAL_TIMEOUT)
     except asyncio.TimeoutError:
-        # Запишем, что именно был глобальный таймаут — бот вытащит это из лога
         print("[fatal] global timeout", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
-        # На любой фатальной ошибке — попробуем сохранить дампы для диагностики
-        try:
-            print(f"[fatal] {e}", file=sys.stderr)
-        finally:
-            sys.exit(1)
+        print(f"[fatal] {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
